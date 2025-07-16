@@ -5,11 +5,13 @@
 (define-constant ERR-ALREADY-VOTED (err u104))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u105))
 (define-constant ERR-NOT-ACTIVE (err u106))
+(define-constant ERR-PAUSED (err u107))
 
 (define-data-var dao-owner principal tx-sender)
 (define-data-var proposal-count uint u0)
 (define-data-var min-proposal-amount uint u1000000)
 (define-data-var voting-period uint u144)
+(define-data-var paused bool false)
 
 (define-map proposals
     uint
@@ -53,6 +55,10 @@
     (var-get proposal-count)
 )
 
+(define-read-only (is-paused)
+    (var-get paused)
+)
+
 (define-public (create-proposal
         (title (string-ascii 100))
         (description (string-ascii 500))
@@ -60,6 +66,7 @@
         (recipient principal)
     )
     (let ((proposal-id (+ (var-get proposal-count) u1)))
+        (asserts! (not (var-get paused)) ERR-PAUSED)
         (asserts! (>= amount (var-get min-proposal-amount))
             ERR-INSUFFICIENT-FUNDS
         )
@@ -86,6 +93,7 @@
         (vote-bool bool)
     )
     (let ((proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL)))
+        (asserts! (not (var-get paused)) ERR-PAUSED)
         (asserts! (is-eq (get-vote proposal-id tx-sender) none) ERR-ALREADY-VOTED)
         (asserts! (< stacks-block-height (get end-block proposal))
             ERR-VOTING-CLOSED
@@ -157,6 +165,22 @@
     (begin
         (asserts! (is-eq tx-sender (var-get dao-owner)) ERR-NOT-AUTHORIZED)
         (var-set dao-owner new-owner)
+        (ok true)
+    )
+)
+
+(define-public (pause-dao)
+    (begin
+        (asserts! (is-eq tx-sender (var-get dao-owner)) ERR-NOT-AUTHORIZED)
+        (var-set paused true)
+        (ok true)
+    )
+)
+
+(define-public (unpause-dao)
+    (begin
+        (asserts! (is-eq tx-sender (var-get dao-owner)) ERR-NOT-AUTHORIZED)
+        (var-set paused false)
         (ok true)
     )
 )
