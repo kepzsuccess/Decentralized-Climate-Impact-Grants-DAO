@@ -6,12 +6,16 @@
 (define-constant ERR-INSUFFICIENT-FUNDS (err u105))
 (define-constant ERR-NOT-ACTIVE (err u106))
 (define-constant ERR-PAUSED (err u107))
+(define-constant ERR-NO-MILESTONE (err u108))
+(define-constant ERR-MILESTONE-COMPLETED (err u109))
+(define-constant ERR-INVALID-MILESTONE (err u110))
 
 (define-data-var dao-owner principal tx-sender)
 (define-data-var proposal-count uint u0)
 (define-data-var min-proposal-amount uint u1000000)
 (define-data-var voting-period uint u144)
 (define-data-var paused bool false)
+(define-data-var milestone-count uint u0)
 
 (define-map proposals
     uint
@@ -37,6 +41,17 @@
     bool
 )
 
+(define-map milestones
+    uint
+    {
+        proposal-id: uint,
+        description: (string-ascii 200),
+        amount: uint,
+        completed: bool,
+        verified-by: (optional principal),
+    }
+)
+
 (define-read-only (get-proposal (id uint))
     (map-get? proposals id)
 )
@@ -57,6 +72,14 @@
 
 (define-read-only (is-paused)
     (var-get paused)
+)
+
+(define-read-only (get-milestone (id uint))
+    (map-get? milestones id)
+)
+
+(define-read-only (get-milestone-count)
+    (var-get milestone-count)
 )
 
 (define-public (create-proposal
@@ -181,6 +204,61 @@
     (begin
         (asserts! (is-eq tx-sender (var-get dao-owner)) ERR-NOT-AUTHORIZED)
         (var-set paused false)
+        (ok true)
+    )
+)
+
+(define-public (create-milestone
+        (proposal-id uint)
+        (description (string-ascii 200))
+        (amount uint)
+    )
+    (let (
+            (milestone-id (+ (var-get milestone-count) u1))
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq tx-sender (get creator proposal)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status proposal) "approved") ERR-NOT-ACTIVE)
+        (map-set milestones milestone-id {
+            proposal-id: proposal-id,
+            description: description,
+            amount: amount,
+            completed: false,
+            verified-by: none,
+        })
+        (var-set milestone-count milestone-id)
+        (ok milestone-id)
+    )
+)
+
+(define-public (complete-milestone (milestone-id uint))
+    (let (
+            (milestone (unwrap! (get-milestone milestone-id) ERR-NO-MILESTONE))
+            (proposal (unwrap! (get-proposal (get proposal-id milestone)) ERR-NO-PROPOSAL))
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq tx-sender (get creator proposal)) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get completed milestone)) ERR-MILESTONE-COMPLETED)
+        (map-set milestones milestone-id (merge milestone { completed: true }))
+        (ok true)
+    )
+)
+
+(define-public (verify-milestone (milestone-id uint))
+    (let ((milestone (unwrap! (get-milestone milestone-id) ERR-NO-MILESTONE)))
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq tx-sender (var-get dao-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (get completed milestone) ERR-INVALID-MILESTONE)
+        (try! (as-contract (stx-transfer? (get amount milestone) tx-sender
+            (get creator
+                (unwrap! (get-proposal (get proposal-id milestone))
+                    ERR-NO-PROPOSAL
+                ))
+        )))
+        (map-set milestones milestone-id
+            (merge milestone { verified-by: (some tx-sender) })
+        )
         (ok true)
     )
 )
