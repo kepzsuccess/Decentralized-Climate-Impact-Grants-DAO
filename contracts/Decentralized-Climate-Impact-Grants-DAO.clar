@@ -9,6 +9,9 @@
 (define-constant ERR-NO-MILESTONE (err u108))
 (define-constant ERR-MILESTONE-COMPLETED (err u109))
 (define-constant ERR-INVALID-MILESTONE (err u110))
+(define-constant ERR-ALREADY-STAKED (err u111))
+(define-constant ERR-NO-STAKE (err u112))
+(define-constant ERR-STAKE-NOT-WITHDRAWABLE (err u113))
 
 (define-data-var dao-owner principal tx-sender)
 (define-data-var proposal-count uint u0)
@@ -52,6 +55,19 @@
     }
 )
 
+(define-map proposal-stakes
+    {
+        proposal-id: uint,
+        staker: principal,
+    }
+    uint
+)
+
+(define-map proposal-total-stakes
+    uint
+    uint
+)
+
 (define-read-only (get-proposal (id uint))
     (map-get? proposals id)
 )
@@ -80,6 +96,20 @@
 
 (define-read-only (get-milestone-count)
     (var-get milestone-count)
+)
+
+(define-read-only (get-stake
+        (proposal-id uint)
+        (staker principal)
+    )
+    (map-get? proposal-stakes {
+        proposal-id: proposal-id,
+        staker: staker,
+    })
+)
+
+(define-read-only (get-total-stakes (proposal-id uint))
+    (default-to u0 (map-get? proposal-total-stakes proposal-id))
 )
 
 (define-public (create-proposal
@@ -260,5 +290,73 @@
             (merge milestone { verified-by: (some tx-sender) })
         )
         (ok true)
+    )
+)
+
+(define-public (stake-proposal
+        (proposal-id uint)
+        (amount uint)
+    )
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+            (current-stake (default-to u0 (get-stake proposal-id tx-sender)))
+            (current-total (get-total-stakes proposal-id))
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (> amount u0) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (is-eq current-stake u0) ERR-ALREADY-STAKED)
+        (asserts! (is-eq (get status proposal) "active") ERR-NOT-ACTIVE)
+        (asserts! (< stacks-block-height (get end-block proposal))
+            ERR-VOTING-CLOSED
+        )
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set proposal-stakes {
+            proposal-id: proposal-id,
+            staker: tx-sender,
+        }
+            amount
+        )
+        (map-set proposal-total-stakes proposal-id (+ current-total amount))
+        (ok true)
+    )
+)
+
+(define-public (claim-stake-reward (proposal-id uint))
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+            (stake-amount (unwrap! (get-stake proposal-id tx-sender) ERR-NO-STAKE))
+            (total-stakes (get-total-stakes proposal-id))
+            (reward-multiplier u120)
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq (get status proposal) "approved") ERR-NOT-ACTIVE)
+        (asserts! (> stake-amount u0) ERR-NO-STAKE)
+        (let ((reward-amount (/ (* stake-amount reward-multiplier) u100)))
+            (try! (as-contract (stx-transfer? reward-amount tx-sender tx-sender)))
+            (map-delete proposal-stakes {
+                proposal-id: proposal-id,
+                staker: tx-sender,
+            })
+            (ok reward-amount)
+        )
+    )
+)
+
+(define-public (withdraw-failed-stake (proposal-id uint))
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+            (stake-amount (unwrap! (get-stake proposal-id tx-sender) ERR-NO-STAKE))
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq (get status proposal) "rejected")
+            ERR-STAKE-NOT-WITHDRAWABLE
+        )
+        (asserts! (> stake-amount u0) ERR-NO-STAKE)
+        (try! (as-contract (stx-transfer? stake-amount tx-sender tx-sender)))
+        (map-delete proposal-stakes {
+            proposal-id: proposal-id,
+            staker: tx-sender,
+        })
+        (ok stake-amount)
     )
 )
