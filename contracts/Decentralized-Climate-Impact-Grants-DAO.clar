@@ -12,6 +12,7 @@
 (define-constant ERR-ALREADY-STAKED (err u111))
 (define-constant ERR-NO-STAKE (err u112))
 (define-constant ERR-STAKE-NOT-WITHDRAWABLE (err u113))
+(define-constant MIN-VOTE-WEIGHT u1000000)
 
 (define-data-var dao-owner principal tx-sender)
 (define-data-var proposal-count uint u0)
@@ -68,6 +69,25 @@
     uint
 )
 
+(define-map weighted-votes
+    {
+        proposal-id: uint,
+        voter: principal,
+    }
+    {
+        vote-choice: bool,
+        weight: uint,
+    }
+)
+
+(define-map proposal-weighted-totals
+    uint
+    {
+        yes-weight: uint,
+        no-weight: uint,
+    }
+)
+
 (define-read-only (get-proposal (id uint))
     (map-get? proposals id)
 )
@@ -110,6 +130,34 @@
 
 (define-read-only (get-total-stakes (proposal-id uint))
     (default-to u0 (map-get? proposal-total-stakes proposal-id))
+)
+
+(define-read-only (get-weighted-vote
+        (proposal-id uint)
+        (voter principal)
+    )
+    (map-get? weighted-votes {
+        proposal-id: proposal-id,
+        voter: voter,
+    })
+)
+
+(define-read-only (get-weighted-totals (proposal-id uint))
+    (default-to {
+        yes-weight: u0,
+        no-weight: u0,
+    }
+        (map-get? proposal-weighted-totals proposal-id)
+    )
+)
+
+(define-read-only (calculate-vote-weight (voter principal))
+    (let ((balance (stx-get-balance voter)))
+        (if (>= balance MIN-VOTE-WEIGHT)
+            (/ balance u1000000)
+            u1
+        )
+    )
 )
 
 (define-public (create-proposal
@@ -358,5 +406,75 @@
             staker: tx-sender,
         })
         (ok stake-amount)
+    )
+)
+
+(define-public (vote-weighted
+        (proposal-id uint)
+        (vote-choice bool)
+    )
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+            (vote-weight (calculate-vote-weight tx-sender))
+            (current-totals (get-weighted-totals proposal-id))
+        )
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq (get-weighted-vote proposal-id tx-sender) none)
+            ERR-ALREADY-VOTED
+        )
+        (asserts! (< stacks-block-height (get end-block proposal))
+            ERR-VOTING-CLOSED
+        )
+        (asserts! (is-eq (get status proposal) "active") ERR-NOT-ACTIVE)
+        (map-set weighted-votes {
+            proposal-id: proposal-id,
+            voter: tx-sender,
+        } {
+            vote-choice: vote-choice,
+            weight: vote-weight,
+        })
+        (if vote-choice
+            (map-set proposal-weighted-totals proposal-id {
+                yes-weight: (+ (get yes-weight current-totals) vote-weight),
+                no-weight: (get no-weight current-totals),
+            })
+            (map-set proposal-weighted-totals proposal-id {
+                yes-weight: (get yes-weight current-totals),
+                no-weight: (+ (get no-weight current-totals) vote-weight),
+            })
+        )
+        (ok vote-weight)
+    )
+)
+
+(define-public (finalize-proposal-weighted (proposal-id uint))
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL))
+            (weighted-totals (get-weighted-totals proposal-id))
+        )
+        (asserts! (>= stacks-block-height (get end-block proposal))
+            ERR-VOTING-CLOSED
+        )
+        (asserts! (is-eq (get status proposal) "active") ERR-NOT-ACTIVE)
+        (if (> (get yes-weight weighted-totals) (get no-weight weighted-totals))
+            (begin
+                (try! (as-contract (stx-transfer? (get amount proposal) tx-sender
+                    (get recipient proposal)
+                )))
+                (map-set proposals proposal-id
+                    (merge proposal { status: "approved" })
+                )
+                (ok true)
+            )
+            (begin
+                (try! (as-contract (stx-transfer? (get amount proposal) tx-sender
+                    (get creator proposal)
+                )))
+                (map-set proposals proposal-id
+                    (merge proposal { status: "rejected" })
+                )
+                (ok true)
+            )
+        )
     )
 )
