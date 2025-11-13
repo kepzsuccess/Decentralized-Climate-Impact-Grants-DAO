@@ -478,3 +478,16 @@
         )
     )
 )
+
+(define-public (tip-approved-proposal
+        (proposal-id uint)
+        (amount uint)
+    )
+    (let ((proposal (unwrap! (get-proposal proposal-id) ERR-NO-PROPOSAL)))
+        (asserts! (not (var-get paused)) ERR-PAUSED)
+        (asserts! (is-eq (get status proposal) "approved") ERR-NOT-ACTIVE)
+        (asserts! (> amount u0) ERR-INSUFFICIENT-FUNDS)
+        (try! (stx-transfer? amount tx-sender (get recipient proposal)))
+        (ok true)
+    )
+)
